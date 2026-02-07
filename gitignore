@@ -1,0 +1,13 @@
+# Node
+node_modules/
+
+# Hardhat / Foundry
+artifacts/
+cache/
+out/
+
+# Env files
+.env
+
+# OS
+.DS_Store
