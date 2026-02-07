@@ -1,0 +1,9 @@
+trading-engine/
+├── contracts/
+│   └── TradingEngine.sol
+│
+├── README.md
+│
+├── LICENSE
+│
+└── .gitignore
