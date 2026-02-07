@@ -1,0 +1,156 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+contract TradingEngine {
+    /*//////////////////////////////////////////////////////////////
+                                ENUMS
+    //////////////////////////////////////////////////////////////*/
+    enum TradeStatus {
+        OPEN,
+        CLOSED,
+        LIQUIDATED
+    }
+
+    enum TradeType {
+        LONG,
+        SHORT
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                                STRUCTS
+    //////////////////////////////////////////////////////////////*/
+    struct Trade {
+        address trader;
+        TradeType tradeType;
+        uint256 entryPrice;
+        uint256 stopLoss;
+        uint256 takeProfit;
+        uint256 margin;
+        TradeStatus status;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            STATE VARIABLES
+    //////////////////////////////////////////////////////////////*/
+    uint256 public tradeCounter;
+    mapping(uint256 => Trade) public trades;
+    mapping(address => uint256) public balances;
+
+    uint256 public currentPrice; // mock oracle
+    uint256 public protocolFees;
+
+    uint256 public constant FEE_BPS = 10; // 0.1%
+
+    /*//////////////////////////////////////////////////////////////
+                                EVENTS
+    //////////////////////////////////////////////////////////////*/
+    event Deposit(address indexed trader, uint256 amount);
+    event TradeOpened(uint256 indexed tradeId, address indexed trader, TradeType tradeType);
+    event TradeClosed(uint256 indexed tradeId, int256 pnl, uint256 fee);
+    event TradeLiquidated(uint256 indexed tradeId);
+
+    /*//////////////////////////////////////////////////////////////
+                            FUND MANAGEMENT
+    //////////////////////////////////////////////////////////////*/
+    function deposit() external payable {
+        require(msg.value > 0, "Zero deposit");
+        balances[msg.sender] += msg.value;
+        emit Deposit(msg.sender, msg.value);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            TRADE LOGIC
+    //////////////////////////////////////////////////////////////*/
+    function openTrade(
+        TradeType _type,
+        uint256 _entryPrice,
+        uint256 _stopLoss,
+        uint256 _takeProfit,
+        uint256 _margin
+    ) external {
+        require(balances[msg.sender] >= _margin, "Insufficient balance");
+
+        if (_type == TradeType.LONG) {
+            require(_stopLoss < _entryPrice, "Invalid SL");
+            require(_takeProfit > _entryPrice, "Invalid TP");
+        } else {
+            require(_stopLoss > _entryPrice, "Invalid SL");
+            require(_takeProfit < _entryPrice, "Invalid TP");
+        }
+
+        balances[msg.sender] -= _margin;
+
+        trades[tradeCounter] = Trade({
+            trader: msg.sender,
+            tradeType: _type,
+            entryPrice: _entryPrice,
+            stopLoss: _stopLoss,
+            takeProfit: _takeProfit,
+            margin: _margin,
+            status: TradeStatus.OPEN
+        });
+
+        emit TradeOpened(tradeCounter, msg.sender, _type);
+        tradeCounter++;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        ORACLE MOCK
+    //////////////////////////////////////////////////////////////*/
+    function updatePrice(uint256 _price) external {
+        currentPrice = _price;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        KEEPER CHECK
+    //////////////////////////////////////////////////////////////*/
+    function checkTrade(uint256 _tradeId) public view returns (bool) {
+        Trade memory t = trades[_tradeId];
+        if (t.status != TradeStatus.OPEN) return false;
+
+        if (t.tradeType == TradeType.LONG) {
+            return currentPrice <= t.stopLoss || currentPrice >= t.takeProfit;
+        } else {
+            return currentPrice >= t.stopLoss || currentPrice <= t.takeProfit;
+        }
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        CLOSE / LIQUIDATE
+    //////////////////////////////////////////////////////////////*/
+    function closeTrade(uint256 _tradeId) external {
+        Trade storage t = trades[_tradeId];
+        require(t.status == TradeStatus.OPEN, "Not open");
+
+        int256 pnl = calculatePnL(t);
+
+        // LIQUIDATION CHECK
+        if (int256(t.margin) + pnl <= 0) {
+            t.status = TradeStatus.LIQUIDATED;
+            emit TradeLiquidated(_tradeId);
+            return;
+        }
+
+        require(checkTrade(_tradeId), "Trade not closable");
+
+        uint256 fee = (t.margin * FEE_BPS) / 10_000;
+        protocolFees += fee;
+
+        int256 finalAmount = int256(t.margin) + pnl - int256(fee);
+        balances[t.trader] += uint256(finalAmount);
+
+        t.status = TradeStatus.CLOSED;
+        emit TradeClosed(_tradeId, pnl, fee);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        INTERNAL PnL
+    //////////////////////////////////////////////////////////////*/
+    function calculatePnL(Trade memory t) internal view returns (int256) {
+        if (t.tradeType == TradeType.LONG) {
+            return int256(currentPrice) - int256(t.entryPrice);
+        } else {
+            return int256(t.entryPrice) - int256(currentPrice);
+        }
+    }
+}
